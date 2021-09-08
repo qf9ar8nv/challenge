@@ -14,46 +14,44 @@ async function CreateChallenge(req, res) {
 	const { user_id, name, challenge_start, challenge_end, private_key, pass_count } = req.body;
 
 	try {
-		Challenge.create(user_id, name, challenge_start, challenge_end, private_key, pass_count)
-			.then((doc) => {
-				console.log("challenge 생성");
-				console.log(doc._id);
-				return doc._id
-			})
-			.catch((err) => {
-				console.error(err);
-				res.send('false');
-			})
-			.then(async (ch_id) => {
-				_user = await User.findOneByUsername(user_id)
-				var chArray;
-				chArray = _user.ch_list
-				_challenge = await Challenge.findById(ch_id)
-				chArray.push(String(_challenge._id));
-				add_user(chArray)
-			})
+		await session.withTransaction(async () => {
+			var chArray;
+			await Challenge.create(user_id, name, challenge_start, challenge_end, private_key, vacation_count)
+				.then((doc) => {
+					console.log("challenge 생성");
+					console.log(doc._id);
+					return doc._id
+				})
+				.then(async (ch_id) => {
+					_user = await User.findOneByUsername(user_id)
+					chArray = _user.ch_list
+					_challenge = await Challenge.findById(ch_id)
+					chArray.push(String(_challenge._id));
+					add_user(chArray)
+				})
 
-		const add_user = (chArray) => User.findOneAndUpdate({ "user_id": user_id }, {
-			$set: {
-				ch_list: chArray,
-			}
-		}, { new: true, useFindAndModify: false }, (err, doc) => {
-			if (err) {
-				throw new Error('user DB에 ch_list 추가 오류')
-			}
-			else {
-				console.log("user에 challenge 추가")
-				console.log(doc)
-				res.send('true')
-			}
-		})
-			.catch((err) => {
-				console.error(err);
-				res.send('false');
+			await User.findOneAndUpdate({ "user_id": user_id }, {
+				$set: {
+					ch_list: chArray,
+				}
+			}, { new: true, useFindAndModify: false }, (err, doc) => {
+				if (err) {
+					throw new Error('user DB에 ch_list 추가 오류')
+				}
+				else {
+					console.log("user에 challenge 추가")
+					console.log(doc)
+				}
 			})
-	} catch (err) {
-		console.log(err)
-		res.send(err)
+		});
+		session.endSession();
+
+		res.send('true')
+	}
+	catch (err) {
+		await session.abortTransaction();
+		session.endSession();
+		res.send('false')
 	}
 }
 
@@ -195,7 +193,7 @@ async function GetChallengeInfo(req, res) {
 			})
 			.catch((err) => {
 				console.log(err)
-				res.send(err)
+				throw err;
 			})
 	} catch (err) {
 		console.log(err)
@@ -278,35 +276,50 @@ async function DeleteChallenge(req, res) {
 
 	try {
 		userArray = await Challenge.findById(id).then((ch) => { return ch.challenge_users })
-		for (let i = 0; i < userArray.length; i++) {
-			list = await User.findOne({ user_id: userArray[i] }).then((user) => { return user.ch_list })
-			await list.splice(list.indexOf(challenge_id), 1);
-			User.findOneAndUpdate({ user_id: userArray[i] }, {
-				$set: {
-					ch_list: list
+
+		try {
+			await session.withTransaction(async () => {
+				//각 User들의 challengeList update
+				for (let i = 0; i < userArray.length; i++) {
+					var before_list = await User.findOne({ user_id: userArray[i] }).then((user) => { return user.ch_list })
+					var list = before_list.filter(challenge => challenge !== challenge_id);
+					User.findOneAndUpdate({ user_id: userArray[i] }, {
+						$set: {
+							ch_list: list
+						}
+					}, { new: true, useFindAndModify: false }, (err, doc) => {
+						if (err) {
+							console.log(err)
+							res.send('false')
+						}
+						else {
+							console.log("user의 challengeList 수정")
+							console.log(userArray[i])
+						}
+					})
 				}
-			}, { new: true, useFindAndModify: false }, (err, doc) => {
-				if (err) {
-					console.log(err)
-					res.send('false')
-				}
-				else {
-					console.log("user의 challengeList 수정")
-					console.log(userArray[i])
-				}
-			})
+
+				//challenge 삭제 코드
+				Challenge.findByIdAndDelete(id, (err, doc) => {
+					if (err) {
+						console.log(err)
+						res.send('false')
+					}
+					else {
+						console.log("challenge 삭제")
+						console.log(doc._id)
+					}
+				})
+			});
+			session.endSession();
+
+			res.send('true')
 		}
-		Challenge.findByIdAndDelete(id, (err, doc) => {
-			if (err) {
-				console.log(err)
-				res.send('false')
-			}
-			else {
-				console.log("challenge 삭제")
-				console.log(doc._id)
-				res.send('true')
-			}
-		})
+		catch (err) {
+			await session.abortTransaction();
+			session.endSession();
+			throw new Error("transaction 처리 에러");
+		}
 	} catch (err) {
 		console.log(err)
 		res.send('false')
@@ -321,58 +334,68 @@ async function JoinChallenge(req, res) {
 	try {
 		const challenge = await Challenge.findById(id)
 		const user = await User.findOneByUsername(user_id)
-		if(challenge === null || user === null) throw "잘못된 요청입니다."
-		if (challenge.private_key === private_key){
+		if (challenge === null || user === null) throw "잘못된 요청입니다."
+		if (challenge.private_key === private_key) {
 			let result = await join(challenge, user);
-			if(result === false) throw "challenge와 user에 추가 오류"
+			if (result === false) throw "challenge와 user에 추가 오류"
 		}
 		else {
 			throw "private_key different!"
 		}
-		res.status(201).json({result: true})
+		res.status(201).json({ result: true })
 	} catch (err) {
 		console.log(err)
-		res.status(401).json({errror: err})
+		res.status(401).json({ errror: err })
 	}
 }
 
-async function join(challenge, user){
-	try{
-		if(challenge.challenge_users.indexOf(user.user_id)>=0 || user.ch_list.indexOf(String(challenge._id))>=0) throw "이미 가입된 유저입니다."
-		
-		// challenge에 user 추가
-		var userArray = [...challenge.challenge_users]
-		var userCount = challenge.challenge_user_num+1
+async function join(challenge, user) {
+	try {
+		if (challenge.challenge_users.indexOf(user.user_id) >= 0 || user.ch_list.indexOf(String(challenge._id)) >= 0) throw "이미 가입된 유저입니다."
 
-		userArray.push(user.user_id);
-		const addCommitCount = challenge.commitCount.create({user_id: user.user_id})
-		const newCommitCount = [...challenge.commitCount, addCommitCount]
+		try {
+			await session.withTransaction(async () => {
+				// challenge에 user 추가
+				var userArray = [...challenge.challenge_users]
+				var userCount = challenge.challenge_user_num + 1
 
-		let challengeResult = await Challenge.findByIdAndUpdate(challenge._id, {
-			$set: {
-				challenge_users: userArray,
-				challenge_user_num: userCount,
-				commitCount: newCommitCount
-			}
-		}, {new: true, useFindAndModify: false}, (err, doc) => {
-			if(err) return false
-		})
-		if(challengeResult === false) throw "challenge에 user 추가 실패"
+				userArray.push(user.user_id);
+				const addCommitCount = challenge.commitCount.create({ user_id: user.user_id })
+				const newCommitCount = [...challenge.commitCount, addCommitCount]
 
-		// user에 challenge 추가
-		var challengeArray = [...user.ch_list, String(challenge._id)]
+				let challengeResult = await Challenge.findByIdAndUpdate(challenge._id, {
+					$set: {
+						challenge_users: userArray,
+						challenge_user_num: userCount,
+						commitCount: newCommitCount
+					}
+				}, { new: true, useFindAndModify: false }, (err, doc) => {
+					if (err) return false
+				})
+				if (challengeResult === false) throw "challenge에 user 추가 실패"
 
-		let userResult = await User.findOneAndUpdate({user_id: user.user_id}, {
-			$set: {
-				ch_list: challengeArray
-			}
-		}, {new:true, useFindAndModify:false}, (err, doc) => {
-			if(err) return false
-		})
-		if(userResult === false) throw "user에 challenge 추가 실패"
+				// user에 challenge 추가
+				var challengeArray = [...user.ch_list, String(challenge._id)]
 
-		return true
-	}catch(err) {
+				let userResult = await User.findOneAndUpdate({ user_id: user.user_id }, {
+					$set: {
+						ch_list: challengeArray
+					}
+				}, { new: true, useFindAndModify: false }, (err, doc) => {
+					if (err) return false
+				})
+				if (userResult === false) throw "user에 challenge 추가 실패"
+			});
+			session.endSession();
+
+			return true
+		}
+		catch (err) {
+			await session.abortTransaction();
+			session.endSession();
+			throw new Error("transaction 처리 에러");
+		}
+	} catch (err) {
 		console.log(err)
 		return false
 	}

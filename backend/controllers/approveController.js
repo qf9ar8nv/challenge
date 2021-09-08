@@ -73,68 +73,71 @@ async function GetAllApproveList(req, res) {
 
 
 async function ConfirmApprove(req, res) {		// approve 승인 누르면 count 증가시키는 api
+	try {
+		const approve_id = req.params.approve_id;
+		const Id = ObjectID(approve_id)
+		const { user_id, ch_id } = req.body;
 
-	const approve_id = req.params.approve_id;
-	const Id = ObjectID(approve_id)
-	const { user_id, ch_id } = req.body;
+		const ch = await Challenge.findById(ch_id)
 
-	const ch = await Challenge.findById(ch_id)
+		const session = await mongoose.startSession(); // 무결성 보장을 위한 transation 처리
+		try {
+			await session.withTransaction(async () => {
+				var userArray, userCnt, approveState;
 
+				//approve 업데이트 계산
+				await Approve.findOneById(Id).then((ap) => {
+					userArray = [...ap.approve_user]
 
-	Approve.findOneById(Id).then((ap) => {
-		userArray = ap.approve_user
+					if (userArray.indexOf(user_id) >= 0) throw new Error('이미 허용 눌렀음')
 
-		for (let i = 0; i < userArray.length; i++) {
-			if (userArray[i] === user_id)
-				throw new Error('이미 허용 눌렀음')
+					userArray.push(user_id)
+					userCnt = ap.approve_cnt + 1;
+					approveState = 0;
+
+					_entireCnt = ch.challenge_user_num
+
+					if (userCnt / _entireCnt >= 0.5) {
+						approveState = 1;
+					}
+				})
+
+				//approve 업데이트 적용
+				await Approve.findByIdAndUpdate(Id, {
+					$set: {
+						approve_user: userArray,
+						approve_cnt: userCnt,
+						state: approveState
+					}
+				}, { new: true, useFindAndModify: false }, (err, doc) => {
+					if (err) {
+						throw new Error('approve 승인 오류')
+					}
+					else {
+						console.log("approve 승인")
+						console.log(doc._id)
+					}
+				})
+			});
+			session.endSession();
 		}
-		userArray.push(user_id)
-		userCnt = ap.approve_cnt + 1;
-		approveState = 0;
-
-		_entireCnt = ch.challenge_user_num
-
-		if (userCnt / _entireCnt >= 0.5) {
-			approveState = 1;
+		catch (err) {
+			await session.abortTransaction();
+			session.endSession();
+			throw new Error("transaction 처리 에러");
 		}
 
-
-		_confirm(userArray, userCnt, approveState)
-
-	})
-		.catch((err) => {
-			console.error(err);
-			res.send('false')
-		})
-
-	const _confirm = (userArray, userCnt, approveState) => Approve.findByIdAndUpdate(Id, {
-		$set: {
-			approve_user: userArray,
-			approve_cnt: userCnt,
-			state: approveState
-		}
-	}, { new: true, useFindAndModify: false }, (err, doc) => {
-		if (err) {
-			throw new Error('approve 승인 오류')
-		}
-		else {
-			console.log("approve 승인")
-			console.log(doc._id)
-			res.send('true')
-		}
-	})
-		.catch((err) => {
-			console.error(err);
-			res.send('false');
-		})
-
+		res.send('true')
+	} catch (err) {
+		console.log(err);
+		res.send('false');
+	}
 }
 
 function GetApproveInfo(req, res) {
 	const approve_id = req.params.approve_id;
 	const id = ObjectID(approve_id);
 	Approve.findOneById(id)
-
 		.then((ap) => {
 			console.log("approve 받음")
 			console.log(ap)
